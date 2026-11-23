@@ -144,7 +144,7 @@ class UsbService : Service() {
         createNotificationChannel()
         // Load the library and initialize libusb on the native thread to keep the main thread responsive.
         serviceScope.launch {
-            val ready = UsbIpNative.init()
+            val ready = UsbIpNative.init(filesDir.resolve("iso-diagnostics.log").absolutePath)
             _state.update { it.copy(nativeReady = ready) }
             if (!ready) {
                 Log.e(TAG, "Native initialization failed, USB/IP features unavailable")

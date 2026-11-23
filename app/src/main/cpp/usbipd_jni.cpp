@@ -4,6 +4,13 @@
 #include <mutex>
 #include <cerrno>
 #include <string>
+#include <charconv>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <libusb-1.0/libusb.h>
 
 #include <spdlog/spdlog.h>
@@ -17,6 +24,53 @@
 #include "jni_log_callback.h"
 
 #define LOG_TAG "UsbIpNative"
+
+#ifdef USBIPDCPP_ISO_DIAGNOSTICS
+namespace {
+    std::mutex iso_journal_mutex;
+    char iso_journal_path[512]{};
+    thread_local int iso_submit_errno = 0;
+    constexpr const char* submit_errno_marker = "submiturb failed, errno=";
+}
+
+namespace usbipdcpp {
+    void clear_iso_submit_errno() noexcept {
+        iso_submit_errno = 0;
+    }
+
+    int last_iso_submit_errno() noexcept {
+        return iso_submit_errno;
+    }
+
+    void write_iso_diagnostic(const char* format, ...) noexcept {
+        try {
+            std::lock_guard lock(iso_journal_mutex);
+            if (!iso_journal_path[0]) return;
+            struct stat info {};
+            if (stat(iso_journal_path, &info) == 0 && info.st_size >= 512 * 1024) {
+                char previous[sizeof(iso_journal_path) + 5];
+                snprintf(previous, sizeof(previous), "%s.prev", iso_journal_path);
+                if (rename(iso_journal_path, previous) != 0) return;
+            }
+
+            if (auto* output = fopen(iso_journal_path, "a")) {
+                timespec timestamp{};
+                clock_gettime(CLOCK_REALTIME, &timestamp);
+                fprintf(output, "%lld.%03ld pid=%d tid=%d ", static_cast<long long>(timestamp.tv_sec),
+                        timestamp.tv_nsec / 1000000, getpid(), gettid());
+                va_list args;
+                va_start(args, format);
+                vfprintf(output, format, args);
+                va_end(args);
+                fputc('\n', output);
+                fclose(output);
+            }
+        } catch (...) {
+            // Diagnostics must not interfere with the transfer or cleanup path.
+        }
+    }
+}
+#endif
 
 // Error code definitions - must match the constants in the Kotlin layer's UsbIpNative.kt
 namespace ErrorCode {
@@ -38,6 +92,14 @@ namespace {
     // Keep verbose logs in logcat; forward only warnings/errors to the existing UI bridge.
     void LIBUSB_CALL libusb_logcat_callback(libusb_context*, libusb_log_level level, const char* message) noexcept {
         const int saved_errno = errno;
+#ifdef USBIPDCPP_ISO_DIAGNOSTICS
+        if (level == LIBUSB_LOG_LEVEL_ERROR) {
+            if (const char* marker = strstr(message, submit_errno_marker)) {
+                marker += strlen(submit_errno_marker);
+                std::from_chars(marker, marker + strlen(marker), iso_submit_errno);
+            }
+        }
+#endif
         int priority;
         switch (level) {
             case LIBUSB_LOG_LEVEL_ERROR: priority = ANDROID_LOG_ERROR; break;
@@ -146,7 +208,21 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved) {
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_yunsmall_usbipdcpp_UsbIpNative_nativeInitImpl(JNIEnv* env, jobject thiz) {
+Java_com_yunsmall_usbipdcpp_UsbIpNative_nativeInitImpl(JNIEnv* env, jobject thiz, jstring journal_path) {
+#ifdef USBIPDCPP_ISO_DIAGNOSTICS
+    if (const char* path = env->GetStringUTFChars(journal_path, nullptr)) {
+        {
+            std::lock_guard lock(iso_journal_mutex);
+            if (strlen(path) < sizeof(iso_journal_path)) {
+                snprintf(iso_journal_path, sizeof(iso_journal_path), "%s", path);
+            }
+        }
+        env->ReleaseStringUTFChars(journal_path, path);
+        usbipdcpp::write_iso_diagnostic("journal_ready");
+    } else {
+        env->ExceptionClear();
+    }
+#endif
     __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "Initializing native layer");
 
     // Hold g_server_mutex throughout initialization: only one concurrent caller performs it; the others wait until it finishes

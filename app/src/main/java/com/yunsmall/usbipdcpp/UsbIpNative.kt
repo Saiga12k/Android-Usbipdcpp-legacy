@@ -90,7 +90,7 @@ object UsbIpNative {
     // ==================== JNI implementations, all private ====================
     // If library loading failed, JNI calls throw UnsatisfiedLinkError (the root cause of cold-start crashes);
     // centralize guards in the public methods below: distributing checks across call sites means a single omission causes a crash.
-    private external fun nativeInitImpl(): Boolean
+    private external fun nativeInitImpl(isoJournalPath: String): Boolean
     private external fun setLogCallbackImpl(callback: LogCallback?)
     private external fun bindUsbDeviceImpl(fd: Int, vendorId: Int, productId: Int, outBusid: Array<String?>): Int
     private external fun unbindUsbDeviceImpl(fd: Int): Int
@@ -120,9 +120,9 @@ object UsbIpNative {
      * Initialize the native layer. false means native is unavailable (library loading or libusb initialization failed),
      * and the caller must skip all subsequent native operations.
      */
-    suspend fun init(): Boolean {
+    suspend fun init(isoJournalPath: String): Boolean {
         if (!libraryLoaded) return false
-        return withContext(jniContext) { nativeInitImpl() }
+        return withContext(jniContext) { nativeInitImpl(isoJournalPath) }
     }
 
     /**
